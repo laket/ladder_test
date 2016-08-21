@@ -26,9 +26,9 @@ tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 
 ########  optimization parameters #############
-tf.app.flags.DEFINE_integer('flat_steps', 100,
+tf.app.flags.DEFINE_integer('flat_epochs', 100,
                             """the number of steps using initial learning rate""")
-tf.app.flags.DEFINE_integer('decay_steps', 50,
+tf.app.flags.DEFINE_integer('decay_epochs', 50,
                             """the number of steps until linearly decreasing to 0""")
 tf.app.flags.DEFINE_float('lr', 0.002,
                           "initial learning rate")
@@ -42,15 +42,14 @@ def add_loss_summaries():
   Return:
     op for generating moving averages of losses.
   """
-  raw_loss = tf.get_collection("cross_entropy")[0]
-  total_loss = tf.get_collection("total_loss")[0]
+  losses = tf.get_collection("summary_loss")
     
   loss_averages = tf.train.ExponentialMovingAverage(0.95, name='avg')
-  loss_averages_op = loss_averages.apply([raw_loss, total_loss])
+  loss_averages_op = loss_averages.apply(losses)
 
-  for name, l in [("cross_entropy", raw_loss), ("total_loss", total_loss)]:
-    tf.scalar_summary(name +' (raw)', l)
-    tf.scalar_summary(name, loss_averages.average(l))
+  for loss_op in losses:
+    tf.scalar_summary(loss_op.op.name +' (raw)', loss_op)
+    tf.scalar_summary(loss_op.op.name, loss_averages.average(loss_op))
 
   return loss_averages_op
 
@@ -74,10 +73,16 @@ def get_train_op(total_loss, global_step):
                                   FLAGS.decay,
                                   staircase=True)
   """
+
+  # "iteration" in Deconstructing article may mean epochs
+  # we iterate all validatoin dataset in each epoch.
+  iter_flat = mnist_input.iter_per_epoch * FLAGS.flat_epochs
+  iter_decay = mnist_input.iter_per_epoch * FLAGS.decay_epochs
+  
   lr = tf.select(
-    tf.less(global_step,FLAGS.flat_steps),
+    tf.less(global_step,iter_flat),
     FLAGS.lr,
-    FLAGS.lr * (1 - tf.cast(tf.truediv((global_step - FLAGS.flat_steps), FLAGS.decay_steps), tf.float32) )
+    FLAGS.lr * (1 - tf.cast(tf.truediv((global_step - iter_flat), iter_decay), tf.float32) )
   )
 
   
@@ -112,14 +117,15 @@ def train():
   with tf.Graph().as_default():
     global_step = tf.Variable(0, trainable=False)
 
-    images, labels = mnist_input.train_input()
+    #images, labels = mnist_input.train_input()
+    images, labels = mnist_input.fast_train_input()
+    unlabeled_images = mnist_input.unlabeled_train_input()
 
     network = ladder.LadderNetwork()
 
-    logits = network.forward(images)
-    total_loss = network.supervised_loss(labels, logits)
-    
-    train_op = get_train_op(total_loss, global_step)
+    with tf.device("/gpu:0"):
+      total_loss = network.total_loss(images, labels, unlabeled_images)
+      train_op = get_train_op(total_loss, global_step)
 
     # Create a saver.
     saver = tf.train.Saver(tf.trainable_variables())
@@ -132,7 +138,10 @@ def train():
 
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.8)    
     # Start running operations on the Graph.
-    sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+    sess = tf.Session(config=tf.ConfigProto(
+      gpu_options=gpu_options,
+      allow_soft_placement=True
+    ))
     sess.run(init)
 
     # Start the queue runners.
@@ -140,7 +149,10 @@ def train():
 
     summary_writer = tf.train.SummaryWriter(FLAGS.dir_log, sess.graph)
 
-    max_steps = FLAGS.flat_steps + FLAGS.decay_steps
+    max_steps = mnist_input.iter_per_epoch * (FLAGS.flat_epochs + FLAGS.decay_epochs)
+
+    print ("max_step : {}".format(max_steps))
+    
     for step in xrange(max_steps):
       start_time = time.time()
       _, loss_value = sess.run([train_op, total_loss])
@@ -158,12 +170,12 @@ def train():
         print (format_str % (datetime.now(), step, loss_value,
                              examples_per_sec, sec_per_batch))
 
-      if step % 10 == 0 or (step + 1) == max_steps:
+      if step % 100 == 0 or (step + 1) == max_steps:
         summary_str = sess.run(summary_op)
         summary_writer.add_summary(summary_str, step)
 
       # Save the model checkpoint periodically.
-      if step % 100 == 0 or (step + 1) == max_steps:
+      if step % 1000 == 0 or (step + 1) == max_steps:
         checkpoint_path = os.path.join(FLAGS.dir_parameter, 'model.ckpt')
         saver.save(sess, checkpoint_path, global_step=step)
 

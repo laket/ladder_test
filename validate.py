@@ -17,13 +17,13 @@ import ladder
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('dir_log', './log',
+tf.app.flags.DEFINE_string('dir_log', './validation_log',
                            """Directory where to write event logs """
                            """and checkpoint.""")
 tf.app.flags.DEFINE_string('dir_parameter', './parameter',
                            """Directory where to write parameters""")
 
-tf.app.flags.DEFINE_integer('eval_interval_secs', 10,
+tf.app.flags.DEFINE_integer('eval_interval_secs', 30,
                             """How often to run the eval.""")
 
 
@@ -88,7 +88,7 @@ def evaluate():
 
     network = ladder.LadderNetwork()
 
-    logits = network.forward(images)
+    logits, _ = network.forward(images, is_first=True)
     top_k_op = tf.nn.in_top_k(logits, labels, 1)
 
     summary_writer = tf.train.SummaryWriter(FLAGS.dir_log, g)
@@ -100,6 +100,11 @@ def evaluate():
         
 def main(argv=None):  # pylint: disable=unused-argument
   mnist_input.init()
+  
+  if tf.gfile.Exists(FLAGS.dir_log):
+    tf.gfile.DeleteRecursively(FLAGS.dir_log)
+  tf.gfile.MakeDirs(FLAGS.dir_log)
+  
   evaluate()
 
 if __name__ == '__main__':

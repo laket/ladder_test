@@ -51,12 +51,12 @@ def vanilla_combinator(z_n, u):
         w0zu, w1zu, b0, b1 = v0("w_0zu"), v0("w_1zu"), v0("b0"), v0("b1")
         ws = v1("w_sigma")
 
-        act = b1 + w1z*z_n + w1z*u + w1zu*z_n*u
+        act = b1 + w1z*z_n + w1u*u + w1zu*z_n*u
         z_h = b0 + w0z*z_n + w0u*u + w0zu*z_n*u + ws * tf.sigmoid(act)
     
     return z_h
 
-def _normalize(v, mu, var, epsilon=0.001):
+def _normalize(v, mu, var, epsilon=1e-10):
     inv = tf.rsqrt(var + epsilon)
     
     return (v-mu)*inv
@@ -106,42 +106,56 @@ class Layer(object):
             else:
                 z = h_pre
             
-            return h_pre, h_pre
+            return z, z, None, None
 
-        with tf.name_scope("encoder"):
-            W = var_wd("W", [Dp, D])
-            # [N, Dn] = [N, Dp] * [Dp, Dn]
-            z_pre = tf.matmul(h_pre, W)
+
+        W = var_wd("W", [Dp, D])
+        # [N, Dn] = [N, Dp] * [Dp, Dn]
+        z_pre = tf.matmul(h_pre, W)
+        Semi supervised learning with Ladder Networkの追試をやってたんだけど、95%までしかでない。(原論文は99%でる)
+        # [Dn]
+        mu, var = tf.nn.moments(z_pre, axes=[0])
         
-            # [Dn]
-            mu, var = tf.nn.moments(z_pre, axes=[0])
+        if noise_std is not None:
+            noise = tf.random_normal([N, D]) * noise_std
+            z = _normalize(z_pre, mu, var) + noise
+        else:
+            z = _normalize(z_pre, mu, var)
 
-            if noise_std is not None:
-                noise = tf.random_normal([N, D]) * noise_std
-                z = _normalize(z_pre, mu, var) + noise
-            else:
-                z = _normalize(z_pre, mu, var)
-                
+        if self.act == tf.nn.relu:
+            beta  = var_wd("beta", [D], tf.constant_initializer(0.0))
+            activation = z + beta
+        elif self.act == tf.identity:
             beta  = var_wd("beta", [D], tf.constant_initializer(0.0))
             gamma = var_wd("gamma", [D], tf.constant_initializer(1.0))
+            activation = gamma * (z+beta)
+        else:
+            raise ValueError("unknown activation function")
 
-            if self.is_last and noise_std is None:
-                self.logits = gamma * (z + beta)
-            h = self.act(gamma * (z + beta))
+        h = self.act(activation)
 
-        return z, h
+        return z, h, mu, var
 
-    def forward(self, h_pre):
-        with tf.variable_scope(self.name):
-            self.z_c, h = self._forward(h_pre, noise_std=None)
-            activation_summary(h)
-            return h
-
-    def noise_forward(self, h_pre):
+    def forward(self, h_pre, reuse=True):
         with tf.variable_scope(self.name) as scope:
-            scope.reuse_variables()            
-            self.z_n, h = self._forward(h_pre, self.noise_std)
-            return h
+            if reuse:
+                scope.reuse_variables()
+            # h_c is not used
+
+            with tf.name_scope("Encoder_clean"):
+                self.z_c, self.h_c, self.mu_c, self.var_c = self._forward(h_pre, noise_std=None)
+                activation_summary(self.h_c)
+            return self.h_c
+
+    def noise_forward(self, h_pre, reuse=True):
+        with tf.variable_scope(self.name) as scope:
+            if reuse:
+                scope.reuse_variables()
+                
+            # h_n is not used but in last layer
+            with tf.name_scope("Encoder_noisy"):
+                self.z_n, self.h_n, _, _ = self._forward(h_pre, self.noise_std)
+            return self.h_n
 
     def backward(self, z_next):
         """
@@ -150,38 +164,72 @@ class Layer(object):
         Args:
           z_next: activation of next layer. [N, Dn]
         """
-        Dn = tf.get_shape(z_next)[1]
+        Dn = z_next.get_shape()[1]
         D = self.D
 
-        with tf.variable_scope("decoder"):
-            if self.is_last:
-                u_pre = z_next
-            else:
-                V = var_wd("V", [Dn, D],)
-                u_pre = tf.matmul(z_next, V)
+        with tf.variable_scope(self.name) as scope:
+            with tf.variable_scope("decoder"):
+                if self.is_last:
+                    u_pre = z_next
+                else:
+                    V = var_wd("V", [Dn, D],)
+                    u_pre = tf.matmul(z_next, V)
 
-            mu, var = tf.nn.moments(u_pre, axes=[0])
-            u = _normalize(u_pre, mu, var)
+                mu, var = tf.nn.moments(u_pre, axes=[0])
+                u = _normalize(u_pre, mu, var)
         
-            self.z_h = self.comb(self.z_n, u)
+                self.z_h = self.comb(self.z_n, u)
 
         return self.z_h
 
+    def reconstruct_cost(self):
+        """
+        calculate reconstruction cost at this layer.
+
+        In the artcile backward path aims to reconstruct pre batch-normalized activation.
+        But output of the first layer is not batch-normalized.
+        So this compares no-batch-normalized value with reconstructed value at the first layer.
+        (this is not clear in articles for me)
+        """
+        if self.is_first:
+            # [N, D]
+            target = self.z_h
+        else:
+            # [N,D] = ([N,D] - D) / D
+            target = _normalize(self.z_h, self.mu_c, self.var_c)            
+
+        # scale factor comes from the original paper page 8.
+        return 2*tf.nn.l2_loss(self.z_c - target) / (self.D*self.batch_size)
+
 class LadderNetwork(object):
-    def init(self, act=tf.nn.relu):
+    def __init__(self, act=tf.nn.relu):
         """
         Args:
           act: activation function
         """
         self.act = act
         self.layers = None
+
+        """
+        hidden layer sizes from the original article.
+        There are other two layers as input and output.
+        """
+        self.layer_sizes = [1000, 500, 250, 250, 250]
+
+        # noise level from the original article
+        # 0.3 is the best at N=100 labels
+        # 0.2 is the best at N=1000 labels
+        self.noise_std = 0.3
+
+        # weight of each layer for reconstruction error.
+        self.loss_lambda = [1000, 10, 0.1, 0.1, 0.1, 0.1, 0.1]
     
-    def forward(self, x):
-        layer_sizes = [1000, 500, 250, 250, 250]
+    def forward(self, x, is_first=False):
+        layer_sizes = self.layer_sizes
         output_size = 10
 
         N, D = x.get_shape().as_list()
-        noise_std = 0.3
+        noise_std = self.noise_std
 
         layers = []
 
@@ -193,33 +241,55 @@ class LadderNetwork(object):
 
         # define hidden layers
         for idx, layer_size in enumerate(layer_sizes):
-            layer = Layer("layer{}".format(idx), layer_size, batch_size=N, noise_std=0.01)
-            h_c = layer.forward(h_c)
+            layer = Layer("layer{}".format(idx), layer_size, batch_size=N, noise_std=noise_std)
+            h_c = layer.forward(h_c, reuse=(not is_first))
             h_n = layer.noise_forward(h_n)
 
             layers.append(layer)
 
-        # last layer is softmax (for classification)
-        last_layer = Layer("last", output_size, batch_size=N, noise_std=noise_std, is_last=True, act=tf.nn.softmax)
-        y_c = last_layer.forward(h_c)
-        y_n = last_layer.noise_forward(h_n)
+        """
+        activation of last layer is identity (for classification)
+        Because outputting logits is better than softmax for stability of loss funcation
+        """
+        last_layer = Layer("last", output_size, batch_size=N, noise_std=noise_std, is_last=True, act=tf.identity)
+        logits_c = last_layer.forward(h_c, reuse=(not is_first))
+        logits_n = last_layer.noise_forward(h_n)
         layers.append(last_layer)
 
         self.layers = layers
 
-        #return y_c, y_n
-        return last_layer.logits
+        return logits_c, logits_n
 
-    def backward(self, y_n):
+    def backward(self):
         """
         Add loss function around backward pass
         """
         if self.layers is None:
             raise ValueError("call forward before backward!")
 
-        z_next = y_n
-        for idx_layer, layer in reversed(self.layers):
+        last_layer = self.layers[-1]
+        #z_next = last_layer.h_n
+        z_next = tf.nn.softmax(last_layer.h_n)
+        
+        for layer in reversed(self.layers):
             z_next = layer.backward(z_next)
+
+    def total_loss(self, x, y, semi_x):
+        """
+        Args:
+          x: supervised x [N, D]
+          y: supervised y [N, M]. onehot vectors
+          semi_x: semi-supervised x [N2, D]
+        """
+        _, noisy_logits = self.forward(x, is_first=True)
+        supervised_loss = self.supervised_loss(y, noisy_logits)
+
+        self.forward(semi_x)
+        self.backward()
+        unsupervised_loss = self.unsupervised_loss() 
+
+        loss = tf.add(supervised_loss, unsupervised_loss, name="total_loss")
+        return loss
 
     def supervised_loss(self, labels, logits):
         """
@@ -228,14 +298,26 @@ class LadderNetwork(object):
           logits: logits of prediction.
         """
         #weight_decay = 0.0004
-        weight_decay = 0.0
-        loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits, labels))
-        weight_loss = tf.add_n(tf.get_collection('L2_LOSS')) * weight_decay
+        #weight_decay = 0.0
+        #weight_loss = tf.add_n(tf.get_collection('L2_LOSS')) * weight_decay
+        cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits, labels)
+        loss = tf.reduce_mean(cross_entropy, name="cross_entropy")
 
-        total_loss = loss + weight_loss
+        tf.add_to_collection("summary_loss", loss)
+
+        return loss
+
+    def unsupervised_loss(self):
+        """
+        calculate unsupervised loss (reconstruction loss).
+        This must be called after 'backward'.
+        """
+        costs = []
         
-        tf.add_to_collection("cross_entropy", loss)
-        tf.add_to_collection("total_loss", total_loss)
+        for lamb, layer in zip(self.loss_lambda, self.layers):
+            costs.append(lamb * layer.reconstruct_cost())
 
-        return total_loss
-            
+        semi_cost = tf.reduce_sum(costs, name="ReconsCost")
+        tf.add_to_collection("summary_loss", semi_cost)
+        
+        return semi_cost
