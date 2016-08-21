@@ -26,15 +26,12 @@ tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 
 ########  optimization parameters #############
-tf.app.flags.DEFINE_integer('max_steps', 1000000,
-                            """Number of batches to run.""")
+tf.app.flags.DEFINE_integer('flat_steps', 100,
+                            """the number of steps using initial learning rate""")
+tf.app.flags.DEFINE_integer('decay_steps', 50,
+                            """the number of steps until linearly decreasing to 0""")
 tf.app.flags.DEFINE_float('lr', 0.002,
                           "initial learning rate")
-tf.app.flags.DEFINE_integer('decay_steps', 3000,
-                        "learning rate decay steps")
-tf.app.flags.DEFINE_float('decay', 0.1,
-                        "learning rate decay factor")
-
 
 
 def add_loss_summaries():
@@ -70,18 +67,28 @@ def get_train_op(total_loss, global_step):
   Returns:
     op for training updates variables
   """
+  """
   lr = tf.train.exponential_decay(FLAGS.lr,
                                   global_step,
                                   FLAGS.decay_steps,
                                   FLAGS.decay,
                                   staircase=True)
+  """
+  lr = tf.select(
+    tf.less(global_step,FLAGS.flat_steps),
+    FLAGS.lr,
+    FLAGS.lr * (1 - tf.cast(tf.truediv((global_step - FLAGS.flat_steps), FLAGS.decay_steps), tf.float32) )
+  )
+
+  
+
   tf.scalar_summary('learning_rate', lr)
 
   loss_average_op = add_loss_summaries()
   
   # Compute gradients.
   with tf.control_dependencies([total_loss, loss_average_op]):
-    opt = tf.train.MomentumOptimizer(lr, momentum=0.95)
+    opt = tf.train.AdamOptimizer(lr)
     grads = opt.compute_gradients(total_loss)
 
   # Apply gradients.
@@ -133,14 +140,15 @@ def train():
 
     summary_writer = tf.train.SummaryWriter(FLAGS.dir_log, sess.graph)
 
-    for step in xrange(FLAGS.max_steps):
+    max_steps = FLAGS.flat_steps + FLAGS.decay_steps
+    for step in xrange(max_steps):
       start_time = time.time()
       _, loss_value = sess.run([train_op, total_loss])
       duration = time.time() - start_time
 
       assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
-      if step % 10 == 0:
+      if step % 10 == 0 or (step + 1) == max_steps:
         num_examples_per_step = FLAGS.batch_size
         examples_per_sec = num_examples_per_step / duration
         sec_per_batch = float(duration)
@@ -150,12 +158,12 @@ def train():
         print (format_str % (datetime.now(), step, loss_value,
                              examples_per_sec, sec_per_batch))
 
-      if step % 100 == 0:
+      if step % 10 == 0 or (step + 1) == max_steps:
         summary_str = sess.run(summary_op)
         summary_writer.add_summary(summary_str, step)
 
       # Save the model checkpoint periodically.
-      if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
+      if step % 100 == 0 or (step + 1) == max_steps:
         checkpoint_path = os.path.join(FLAGS.dir_parameter, 'model.ckpt')
         saver.save(sess, checkpoint_path, global_step=step)
 

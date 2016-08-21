@@ -180,9 +180,6 @@ class LadderNetwork(object):
         layer_sizes = [1000, 500, 250, 250, 250]
         output_size = 10
 
-        tf.histogram_summary('input', x)
-
-        
         N, D = x.get_shape().as_list()
         noise_std = 0.3
 

@@ -10,10 +10,11 @@ import tensorflow as tf
 SOURCE_URL = 'http://yann.lecun.com/exdb/mnist/'
 
 tf.app.flags.DEFINE_string("dir_data", "./data", "data directory")
-tf.app.flags.DEFINE_integer("batch_size", 128, "batch size")
+tf.app.flags.DEFINE_integer("batch_size", 100, "batch size")
 
 FLAGS = tf.app.flags.FLAGS
 VALIDATION_SIZE = 10000
+#VALIDATION_SIZE = 59900
 NUM_CLASSES = 10
 
 train_data_filename = None

@@ -23,7 +23,7 @@ tf.app.flags.DEFINE_string('dir_log', './log',
 tf.app.flags.DEFINE_string('dir_parameter', './parameter',
                            """Directory where to write parameters""")
 
-tf.app.flags.DEFINE_integer('eval_interval_secs', 60,
+tf.app.flags.DEFINE_integer('eval_interval_secs', 10,
                             """How often to run the eval.""")
 
 
