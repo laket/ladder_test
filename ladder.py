@@ -112,7 +112,7 @@ class Layer(object):
         W = var_wd("W", [Dp, D])
         # [N, Dn] = [N, Dp] * [Dp, Dn]
         z_pre = tf.matmul(h_pre, W)
-        Semi supervised learning with Ladder Networkの追試をやってたんだけど、95%までしかでない。(原論文は99%でる)
+        
         # [Dn]
         mu, var = tf.nn.moments(z_pre, axes=[0])
         
