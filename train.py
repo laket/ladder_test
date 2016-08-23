@@ -30,7 +30,7 @@ tf.app.flags.DEFINE_integer('flat_epochs', 100,
                             """the number of steps using initial learning rate""")
 tf.app.flags.DEFINE_integer('decay_epochs', 50,
                             """the number of steps until linearly decreasing to 0""")
-tf.app.flags.DEFINE_float('lr', 0.002,
+tf.app.flags.DEFINE_float('lr', 0.02,
                           "initial learning rate")
 
 

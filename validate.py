@@ -88,7 +88,7 @@ def evaluate():
 
     network = ladder.LadderNetwork()
 
-    logits, _ = network.forward(images, is_first=True)
+    logits, _ = network.forward(images)
     top_k_op = tf.nn.in_top_k(logits, labels, 1)
 
     summary_writer = tf.train.SummaryWriter(FLAGS.dir_log, g)

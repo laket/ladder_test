@@ -136,22 +136,15 @@ class Layer(object):
 
         return z, h, mu, var
 
-    def forward(self, h_pre, reuse=True):
+    def forward(self, h_pre):
         with tf.variable_scope(self.name) as scope:
-            if reuse:
-                scope.reuse_variables()
-            # h_c is not used
-
             with tf.name_scope("Encoder_clean"):
                 self.z_c, self.h_c, self.mu_c, self.var_c = self._forward(h_pre, noise_std=None)
                 activation_summary(self.h_c)
             return self.h_c
 
-    def noise_forward(self, h_pre, reuse=True):
+    def noise_forward(self, h_pre):
         with tf.variable_scope(self.name) as scope:
-            if reuse:
-                scope.reuse_variables()
-                
             # h_n is not used but in last layer
             with tf.name_scope("Encoder_noisy"):
                 self.z_n, self.h_n, _, _ = self._forward(h_pre, self.noise_std)
@@ -168,17 +161,16 @@ class Layer(object):
         D = self.D
 
         with tf.variable_scope(self.name) as scope:
-            with tf.variable_scope("decoder"):
-                if self.is_last:
-                    u_pre = z_next
-                else:
-                    V = var_wd("V", [Dn, D],)
-                    u_pre = tf.matmul(z_next, V)
+            if self.is_last:
+                u_pre = z_next
+            else:
+                V = var_wd("V", [Dn, D],)
+                u_pre = tf.matmul(z_next, V)
 
-                mu, var = tf.nn.moments(u_pre, axes=[0])
-                u = _normalize(u_pre, mu, var)
+            mu, var = tf.nn.moments(u_pre, axes=[0])
+            u = _normalize(u_pre, mu, var)
         
-                self.z_h = self.comb(self.z_n, u)
+            self.z_h = self.comb(self.z_n, u)
 
         return self.z_h
 
@@ -224,7 +216,7 @@ class LadderNetwork(object):
         # weight of each layer for reconstruction error.
         self.loss_lambda = [1000, 10, 0.1, 0.1, 0.1, 0.1, 0.1]
     
-    def forward(self, x, is_first=False):
+    def forward(self, x, need_noise=False):
         layer_sizes = self.layer_sizes
         output_size = 10
 
@@ -236,26 +228,28 @@ class LadderNetwork(object):
         # define first layer
         first_layer = Layer("input", D, batch_size=N, noise_std=noise_std, is_first=True)
         h_c = first_layer.forward(x)
-        h_n = first_layer.noise_forward(x)
         layers.append(first_layer)
 
         # define hidden layers
         for idx, layer_size in enumerate(layer_sizes):
             layer = Layer("layer{}".format(idx), layer_size, batch_size=N, noise_std=noise_std)
-            h_c = layer.forward(h_c, reuse=(not is_first))
-            h_n = layer.noise_forward(h_n)
-
+            h_c = layer.forward(h_c)
             layers.append(layer)
 
-        """
-        activation of last layer is identity (for classification)
-        Because outputting logits is better than softmax for stability of loss funcation
-        """
         last_layer = Layer("last", output_size, batch_size=N, noise_std=noise_std, is_last=True, act=tf.identity)
-        logits_c = last_layer.forward(h_c, reuse=(not is_first))
-        logits_n = last_layer.noise_forward(h_n)
+        logits_c = last_layer.forward(h_c)
         layers.append(last_layer)
 
+        logits_n = None
+        
+        if need_noise:
+            with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+                h_n = x
+                for layer in layers:
+                    h_n = layer.noise_forward(h_n)
+                
+                logits_n = h_n
+            
         self.layers = layers
 
         return logits_c, logits_n
@@ -281,11 +275,13 @@ class LadderNetwork(object):
           y: supervised y [N, M]. onehot vectors
           semi_x: semi-supervised x [N2, D]
         """
-        _, noisy_logits = self.forward(x, is_first=True)
+        _, noisy_logits = self.forward(x, need_noise=True)
         supervised_loss = self.supervised_loss(y, noisy_logits)
 
-        self.forward(semi_x)
+        with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+            self.forward(semi_x, need_noise=True)
         self.backward()
+        
         unsupervised_loss = self.unsupervised_loss() 
 
         loss = tf.add(supervised_loss, unsupervised_loss, name="total_loss")
